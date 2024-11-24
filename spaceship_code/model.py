@@ -1,37 +1,69 @@
-import torch
-from torch import nn
 import numpy as np
-from torch import optim
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 class MainCNN(nn.Module):
     """Simple neural network model for predicting the outcome variable."""
-    def __init__(self, input_dim: int, p):
-        super().__init__()
 
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.act1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(p)
-        self.fc2 = nn.Linear(128, 32)
-        self.act2 = nn.ReLU()
-        self.fc3 = nn.Linear(32, 8)
-        self.act3 = nn.ReLU()
-        self.dropout2 = nn.Dropout(p)
-        self.fc4 = nn.Linear(8, 1)
+    def __init__(self, input_dim, p=0.2):
+        super(MainCNN, self).__init__()
+        self.fc0 = nn.Linear(input_dim, 128)
+
+        # Define activation functions
+        self.gelu = nn.GELU()
+        self.dropout01 = nn.Dropout(p)
+
+        # Interaction layer (quadratic terms for feature interactions)
+        self.interaction_layer = nn.Linear(input_dim, 128)
+        self.dropout02 = nn.Dropout(p)
+
+        # Define the next linear layer that combines the concatenated outputs
+        self.fc1 = nn.Linear(128 * 2, 128)
+
+        # Define the layers
+        self.bn1 = nn.BatchNorm1d(128)
+        self.act1 = nn.GELU()
+        self.dropout1 = nn.AlphaDropout(p)
+
+        self.fc2 = nn.Linear(128, 64)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.act2 = nn.GELU()
+        self.dropout2 = nn.AlphaDropout(p)
+
+        self.fc3 = nn.Linear(64, 32)
+        self.bn3 = nn.BatchNorm1d(32)
+        self.act3 = nn.GELU()
+        self.dropout3 = nn.AlphaDropout(p)
+
+        self.fc4 = nn.Linear(32, 1) # Output layer
 
     def forward(self, x):
-        x = self.act1(self.fc1(x))
-        x = self.dropout1(x)
-        x = self.act2(self.fc2(x))
-        x = self.act3(self.fc3(x))
-        x = self.dropout2(x)
-        x = self.fc4(x)
-        return x
+        # First layer
+        x_fc0 = self.fc0(x)
 
-    def train_new_data(self, x: np.array, y: np.array, epochs: int,
+        # Apply different activations in parallel
+        x_gelu = self.dropout01(self.gelu(x_fc0))
+        # Feature interaction layer
+        x_interactions = self.dropout02(self.interaction_layer(x * x))  # Element-wise squared terms (x_i * x_j for i=j)
+
+        # Concatenate the outputs
+        x_concat = torch.cat((x_gelu, x_interactions), dim=1)
+        x = self.dropout1(self.act1(self.bn1(self.fc1(x_concat))))
+        x = self.dropout2(self.act2(self.bn2(self.fc2(x))))
+        x = self.dropout3(self.act3(self.bn3(self.fc3(x))))
+        x = self.fc4(x)
+        return torch.sigmoid(x)
+
+    def train_new_data(self,
+                       x: np.array,
+                       y: np.array,
+                       epochs: int,
                        learning_rate: float,
                        early_stopping_patience: int = 100,
                        early_stopping_min_delta: float = 0.0,
-                       print_every_x: int = 2) -> None:
+                       print_every_x: int = 2,
+                       w_decay = 1e-4) -> None:
         """
         Train the neural network model.
         :param x: np.array, the input data.
@@ -41,14 +73,15 @@ class MainCNN(nn.Module):
         :param early_stopping_patience: int, how many epochs to wait before stopping when loss is not improving.
         :param early_stopping_min_delta: float, minimum change in the monitored quantity to qualify as an improvement.
         :param print_every_x: int, print the loss for every x epochs.
+        :param w_decay: float, the weight_decay parameter
         """
         # Convert numpy arrays to torch tensors
         x_tensor = torch.tensor(x, dtype=torch.float32)
         y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1)
 
         # Define the loss function and the optimizer
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate, weight_decay=w_decay)
 
         # Initialize early stopping
         early_stopping = EarlyStopping(patience=early_stopping_patience, min_delta=early_stopping_min_delta)
@@ -99,7 +132,7 @@ class MainCNN(nn.Module):
 
 # helper class
 class EarlyStopping:
-    def __init__(self, patience=7, min_delta=0):
+    def __init__(self, patience: int = 7, min_delta: float = 0):
         """
         Early stopping to stop the training when the loss does not improve after certain epochs.
         :param patience: int, how many epochs to wait before stopping when loss is not improving.
